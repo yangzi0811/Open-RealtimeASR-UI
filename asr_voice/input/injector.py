@@ -209,7 +209,7 @@ def _is_wechat_foreground() -> bool:
     return any(h in name for h in _WECHAT_PROCESS_HINTS)
 
 
-def _send_unicode_text(text: str, delay: float = 0.0) -> None:
+def _send_unicode_text(text: str, delay: float = 0.0, should_cancel=None) -> None:
     """通过 Windows SendInput + KEYEVENTF_UNICODE 直接发送 Unicode 字符（delay=每字间隔秒）。
 
     比 keyboard.write 可靠：不触发目标程序 Alt 菜单快捷键（首字丢失根因）、不依赖 Num Lock。
@@ -277,6 +277,8 @@ def _send_unicode_text(text: str, delay: float = 0.0) -> None:
     for i, ch in enumerate(text):
         if delay > 0 and i > 0:
             time.sleep(delay)
+        if should_cancel is not None and should_cancel():
+            return
         code = ord(ch)
         ki_down = KEYBDINPUT(0, code, KEYEVENTF_UNICODE, 0, None)
         ki_up = KEYBDINPUT(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, None)
@@ -332,6 +334,8 @@ class TextInjector:
         self.selection_prev_clip: str | None = None
         # 注入队列 + 专用线程：见类 docstring
         self._jobs: "queue.Queue" = queue.Queue()
+        self._cancel_generation = 0
+        self._active_generation = 0
         threading.Thread(
             target=self._worker_loop, daemon=True, name="inject-worker"
         ).start()
@@ -372,7 +376,16 @@ class TextInjector:
         return ts > 0.0 and (time.monotonic() - ts) < SYNTHETIC_INPUT_GUARD_S
 
     def _submit(self, job: Callable[[], None]) -> None:
-        self._jobs.put(job)
+        generation = self._cancel_generation
+        def run_if_current():
+            if generation != self._cancel_generation:
+                return
+            self._active_generation = generation
+            job()
+        self._jobs.put(run_if_current)
+
+    def _input_cancelled(self) -> bool:
+        return self._active_generation != self._cancel_generation
 
     @staticmethod
     def _run_done_callback(done_callback: Optional[Callable[[], None]]) -> None:
@@ -385,6 +398,8 @@ class TextInjector:
 
     def cancel_pending(self) -> None:
         """丢弃队列中尚未开始执行的注入任务（会话打断时防残留上屏）。"""
+        # 已开始的逐字输入也须停止，避免用户打字后仍追加语音或继续退格。
+        self._cancel_generation += 1
         dropped = 0
         while True:
             try:
@@ -641,10 +656,11 @@ class TextInjector:
                 # 首字符单独发送 + 50ms 间隔：微信等程序在注入启动瞬间
                 # （焦点/输入法状态切换）会吞掉第一组键击，首字连发必丢；
                 # 单发首字等目标就绪后再发剩余，可恢复
-                _send_unicode_text(text[0])
+                _send_unicode_text(text[0], should_cancel=self._input_cancelled)
                 time.sleep(0.05)
                 if len(text) > 1:
-                    _send_unicode_text(text[1:], delay=0.005)
+                    _send_unicode_text(text[1:], delay=0.005,
+                                       should_cancel=self._input_cancelled)
                 logger.info("注入完成[simulate_keys] %d字", len(text))
             # keep_clipboard：逐字输入时结果也放进剪贴板（只写不粘）。只需含文本格式即可写，
             # 仅图片/文件时不覆盖；增量注入须传完整累积文本，避免剪贴板只剩最后一段增量。
@@ -741,6 +757,8 @@ class TextInjector:
         # 会丢键（尤其连按 5+ 次），导致删不干净原文——LLM 修正替换时
         # 残留原文 + 重写修正版 = 看起来像"重复文本"。每 3 次让出 10ms。
         for i in range(count):
+            if self._input_cancelled():
+                return
             keyboard.send("backspace")
             if i % 3 == 2:
                 time.sleep(0.010)

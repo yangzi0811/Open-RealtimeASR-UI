@@ -115,6 +115,7 @@ class VoiceApp(QObject):
         self._default_engine: str | None = "funasr" if is_steam_build() else None
         self.state = APP_STATE_IDLE
         self.auto_stop_seconds = getattr(config.recording, "auto_stop_seconds", 5)
+        self._any_key_listener = None
         self._lock = threading.Lock()
         self._last_voice_time = 0.0
 
@@ -529,9 +530,11 @@ class VoiceApp(QObject):
         logger.info("应用已启动 引擎=%s 热键=%s", engine_desc, self.cfg.hotkey.toggle)
         print(t("app.msg.started", hotkey=self.cfg.hotkey.toggle.upper()))
 
-        # 删除键打断录音（可选，默认关闭）：仅监听不拦截按键
+        self._update_any_key_listener()
+        # 任意键监听自带准确的合成键过滤，启用时不用删除键轮询。
         self._update_delete_listener(
             bool(getattr(getattr(self.cfg, "ui", None), "interrupt_on_delete", False))
+            and not bool(getattr(self.cfg.recording, "stop_on_any_key", False))
         )
 
         # FunASR 引擎：启动后台预热模型
@@ -555,6 +558,37 @@ class VoiceApp(QObject):
             # 「事件循环已结束」＝没人调过 _on_exit 也会走到这里（Qt 自己退出 /
             # exec() 抛异常等），显式标注入口。触发方是日志取值不是界面文案，故豁免。
             self._cleanup("事件循环已结束")  # noqa: i18n
+
+    def _update_any_key_listener(self) -> None:
+        enabled = bool(getattr(self.cfg.recording, "stop_on_any_key", False))
+        listener = getattr(self, "_any_key_listener", None)
+        if listener is not None and not enabled:
+            listener.stop()
+            self._any_key_listener = None
+        elif enabled and listener is None:
+            from ..hotkey.physical import PhysicalKeyListener
+            listener = PhysicalKeyListener(self._on_any_key_interrupt)
+            listener.start()
+            self._any_key_listener = listener
+            logger.info("任意键停止已开启（忽略程序合成按键，PB 保留原启停逻辑）")
+
+    def _on_any_key_interrupt(self) -> None:
+        if not bool(getattr(self.cfg.recording, "stop_on_any_key", False)):
+            return
+        if self.state != APP_STATE_LISTENING or self._discard_results:
+            return
+        # 先关结果闸门，避免用户开始打字后又被尾句/退格重写打乱。
+        self._discard_results = True
+        self._session_interrupted = True
+        self.injector.cancel_pending()
+        logger.info("任意键停止请求（保留已上屏文字，丢弃未上屏尾句）")
+        threading.Thread(target=self._stop_after_any_key, daemon=True,
+                         name="any-key-stop").start()
+
+    def _stop_after_any_key(self) -> None:
+        with self._lock:
+            if self.state == APP_STATE_LISTENING:
+                self._stop_session()
 
     # ---- 删除键打断（可选功能）----
 
@@ -1546,8 +1580,10 @@ class VoiceApp(QObject):
         self.bar.cfg = new_cfg.ui
 
         # 删除键打断开关热加载
+        self._update_any_key_listener()
         self._update_delete_listener(
             bool(getattr(getattr(new_cfg, "ui", None), "interrupt_on_delete", False))
+            and not bool(getattr(new_cfg.recording, "stop_on_any_key", False))
         )
 
         # LLM 修正器热加载：启用且填 key 则创建，否则置空
@@ -2134,6 +2170,9 @@ class VoiceApp(QObject):
         for listener in self.delete_listeners:
             listener.stop()
         self._stop_delete_poll()
+        if self._any_key_listener is not None:
+            self._any_key_listener.stop()
+            self._any_key_listener = None
         # 暂停播放/全局静音：退出兑底恢复（退出路径不经过 stop_session）
         try:
             self.media_pauser.resume()

@@ -186,6 +186,7 @@ DEFAULTS = {
     },
     "recording": {
         "mode": "realtime",         # "realtime" 实时流式 | "sentence" 一句话识别
+        "stop_on_any_key": False,   # 真正按下任意键时停止；忽略程序合成按键，PB 仍走原热键
         "auto_stop_seconds": 10,    # 无语音超时自动停止，0=不自动停止
         "max_session_seconds": 60,  # 单次录音硬超时（秒），兜底防底噪贴阈值停不下来；0=不限时
         # 逐字同步：中间(未断句)结果实时增量写入输入框，ASR 回头修正才退格重打
