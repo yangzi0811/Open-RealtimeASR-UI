@@ -431,6 +431,9 @@ class FloatingBar(QWidget):
         return bool(self.windowFlags() & Qt.WindowStaysOnTopHint)
 
     def show(self) -> None:
+        if bool(getattr(self.cfg, "hide_overlay", False)):
+            self.hide()
+            return
         super().show()
         self._apply_no_activate()
         self._assert_topmost()
@@ -1863,6 +1866,9 @@ class FloatingBar(QWidget):
         import time
         bubble = getattr(self, "_bubble", None)
         if bubble is None:
+            return
+        if bool(getattr(self.cfg, "hide_overlay", False)):
+            bubble.hide()
             return
         # 非声纹主题：录音文本/错误/提示都画在条上，气泡只在语音模式出场
         #（语音模式下所有主题统一用气泡承载内容，见 _draw_text 的分流）

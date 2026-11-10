@@ -120,6 +120,7 @@ DEFAULTS = {
         # 界面语言：""=首次运行按系统语言自动检测；"zh"|"en" 手动固定（无热切换，重启生效）
         "language": "",
         "auto_hide_seconds": 0,          # 空闲多久自动隐藏到托盘（0=不自动隐藏）
+        "hide_overlay": False,           # 隐藏悬浮条和文字预览；热键、识别、输入及托盘继续工作
         "always_on_top": True,           # 永远置顶（False=允许其他窗口遮挡悬浮条）
         # 设置界面主题内部键（minimal_dark/fluent_light）；显示名走 set.style.* 词条。
         # 老配置里的中文旧值由 loader 一次性迁移（同 ui.theme_name 的做法）
